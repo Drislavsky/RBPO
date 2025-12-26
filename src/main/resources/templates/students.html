@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head><meta charset="UTF-8"/><title>Студенты</title></head>
+<body>
+<h3>Студенты</h3>
+<table border="1">
+    <tr><th>ID</th><th>Имя</th><th>Email</th><th>UserId</th></tr>
+    <tr th:each="s: ${students}">
+        <td th:text="${s.id}"></td>
+        <td th:text="${s.name}"></td>
+        <td th:text="${s.email}"></td>
+        <td th:text="${s.userId}"></td>
+    </tr>
+</table>
+<hr/>
+<h4>Добавить студента</h4>
+<form method="post" action="/students">
+    <input name="name" placeholder="Имя"/>
+    <input name="email" placeholder="Email"/>
+    <input name="userId" placeholder="userId"/>
+    <button type="submit">Сохранить</button>
+</form>
+<p><a href="/">На главную</a></p>
+</body>
+</html>
