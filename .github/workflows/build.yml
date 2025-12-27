@@ -1,0 +1,161 @@
+name: Security Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  secrets-scan:
+    name: Secrets Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          VERSION="8.18.2"
+          wget https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz
+          tar -xf gitleaks_${VERSION}_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run Gitleaks
+        run: gitleaks detect --source . -v --exit-code 2
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build application
+        run: mvn -B -DskipTests clean package
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-artifact
+          path: target/*.jar
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    needs: build
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Semgrep
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install semgrep
+      - name: Run Semgrep
+        run: |
+          source venv/bin/activate
+          semgrep scan --config auto --json --output semgrep.json || true
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: semgrep.json
+
+  sca:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Run OWASP Dependency Check
+        run: mvn -B org.owasp:dependency-check-maven:check -Dnvd.api.key=${{ secrets.NVD_API_KEY }}
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          path: target/dependency-check-report.html
+
+  docker-build-scan-push:
+    name: Docker Scan and Push
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+          path: target
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Image
+        run: |
+          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          docker build -t $IMAGE_ID .
+          echo "IMAGE_NAME=$IMAGE_ID" >> $GITHUB_ENV
+      - name: Run Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+      - name: Push Image
+        if: success()
+        run: docker push ${{ env.IMAGE_NAME }}
+
+  dast-and-fuzzing:
+    name: DAST and Fuzzing
+    runs-on: ubuntu-latest
+    needs: [build, docker-build-scan-push]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: jar-artifact
+          path: target
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - name: Start Application
+        run: |
+          nohup java -jar target/*.jar &
+          sleep 30
+      - name: Create Rules
+        run: touch zap_rules.tsv && chmod 777 zap_rules.tsv
+      - name: ZAP Baseline Scan
+        run: |
+          docker run --rm --network host -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable \
+          zap-baseline.py -t http://localhost:8080 -r zap-baseline-report.html -I || true
+      - name: ZAP API Fuzzing
+        run: |
+          docker run --rm --network host -v $(pwd):/zap/wrk/:rw ghcr.io/zaproxy/zaproxy:stable \
+          zap-api-scan.py -t http://localhost:8080/v3/api-docs -f openapi -r zap-fuzz-report.html -I || true
+      - name: Upload Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-reports
+          path: |
+            zap-baseline-report.html
+            zap-fuzz-report.html
