@@ -7,21 +7,24 @@ on:
 
 jobs:
   secrets-scan:
-    name: Secrets Scan (Gitleaks)
+    name: Secrets Scan (Gitleaks Full)
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        with:
-          args: detect --source . -v --exit-code 2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Gitleaks
+        run: |
+          VERSION="8.18.2"
+          wget https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz
+          tar -xf gitleaks_${VERSION}_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks Full Scan
+        run: |
+          # Команда detect без доп. параметров лога сканирует всё дерево файлов + историю
+          gitleaks detect --source . -v --exit-code 2
 
   build:
     name: Build
